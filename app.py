@@ -278,8 +278,69 @@ class RAGChatbot:
         # Export chat
         if st.session_state.messages:
             st.sidebar.subheader("💾 Export")
-            if st.sidebar.button("Export Chat History"):
-                self.export_chat_history()
+            
+            # Export format selection
+            export_format = st.sidebar.selectbox(
+                "Export Format:",
+                ["Markdown (.md)", "Plain Text (.txt)", "JSON (.json)"],
+                help="Choose the format for your chat export"
+            )
+            
+            # Generate export data based on format
+            if export_format == "Markdown (.md)":
+                export_data = self.generate_chat_export("markdown")
+                file_extension = "md"
+                mime_type = "text/markdown"
+            elif export_format == "Plain Text (.txt)":
+                export_data = self.generate_chat_export("text")
+                file_extension = "txt"
+                mime_type = "text/plain"
+            else:  # JSON
+                export_data = self.generate_chat_export("json")
+                file_extension = "json"
+                mime_type = "application/json"
+            
+            # Create download button
+            st.sidebar.download_button(
+                label="📥 Download Chat History",
+                data=export_data,
+                file_name=f"rag_chatbot_history_{st.session_state.get('export_timestamp', 'export')}.{file_extension}",
+                mime=mime_type,
+                help="Download your conversation in the selected format"
+            )
+            
+            # Export preview
+            if st.sidebar.expander("👁️ Preview Export"):
+                if export_format == "JSON (.json)":
+                    try:
+                        import json
+                        # Parse and limit JSON for preview
+                        json_data = json.loads(export_data)
+                        preview_data = {
+                            "metadata": json_data.get("metadata", {}),
+                            "messages": json_data.get("messages", [])[:2],  # Show only first 2 messages
+                            "note": f"Showing first 2 messages. Full export contains {len(json_data.get('messages', []))} messages."
+                        }
+                        st.sidebar.json(preview_data)
+                    except:
+                        st.sidebar.text("JSON preview error")
+                else:
+                    preview_text = export_data[:400] + "..." if len(export_data) > 400 else export_data
+                    st.sidebar.text_area("Preview:", preview_text, height=120, disabled=True)
+            
+            # Show export statistics
+            user_msgs = len([m for m in st.session_state.messages if m["role"] == "user"])
+            assistant_msgs = len([m for m in st.session_state.messages if m["role"] == "assistant"])
+            msgs_with_sources = len([m for m in st.session_state.messages if m.get("sources")])
+            
+            st.sidebar.caption(f"💬 {len(st.session_state.messages)} messages ({user_msgs} user, {assistant_msgs} assistant)")
+            if msgs_with_sources > 0:
+                st.sidebar.caption(f"📚 {msgs_with_sources} messages include source references")
+            
+            # Clear chat history button
+            if st.sidebar.button("🗑️ Clear Chat History", help="Delete all chat messages"):
+                st.session_state.messages = []
+                st.rerun()
         
         # Debug info (only show if document is processed)
         if st.sidebar.expander("🔧 Debug Info"):
@@ -485,8 +546,14 @@ class RAGChatbot:
     def handle_user_query(self, query: str):
         """Handle user query and generate response."""
         try:
-            # Add user message
-            st.session_state.messages.append({"role": "user", "content": query})
+            from datetime import datetime
+            
+            # Add user message with timestamp
+            st.session_state.messages.append({
+                "role": "user", 
+                "content": query,
+                "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            })
             
             # Show user message immediately
             with st.chat_message("user"):
@@ -534,7 +601,8 @@ class RAGChatbot:
                                     "role": "assistant", 
                                     "content": answer,
                                     "sources": detailed_results,
-                                    "follow_ups": follow_ups
+                                    "follow_ups": follow_ups,
+                                    "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                                 })
                                 self.handle_user_query(question)
                                 return
@@ -544,37 +612,118 @@ class RAGChatbot:
                 "role": "assistant", 
                 "content": answer,
                 "sources": detailed_results,
-                "follow_ups": follow_ups
+                "follow_ups": follow_ups,
+                "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             })
         
         except Exception as e:
             st.error(f"❌ Error generating response: {str(e)}")
     
-    def export_chat_history(self):
-        """Export chat history to a downloadable file."""
+    def generate_chat_export(self, format_type="markdown"):
+        """Generate chat history export in different formats."""
         try:
-            chat_text = "# RAG Chatbot Conversation Export\n\n"
+            from datetime import datetime
+            import json
             
-            for i, message in enumerate(st.session_state.messages):
-                if message["role"] == "user":
-                    chat_text += f"**User:** {message['content']}\n\n"
-                else:
-                    chat_text += f"**Assistant:** {message['content']}\n\n"
-                    if "sources" in message:
-                        chat_text += "**Sources:**\n"
-                        for j, source in enumerate(message["sources"]):
-                            chat_text += f"{j+1}. {source['content_preview']} (Score: {source['similarity_score']:.3f})\n"
+            # Update export timestamp in session state
+            current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+            st.session_state.export_timestamp = current_time
+            
+            # Get metadata
+            valid_openai = (self.openai_api_key and 
+                           len(self.openai_api_key) > 20 and 
+                           not self.openai_api_key.startswith("your_"))
+            
+            metadata = {
+                "export_date": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                "total_messages": len(st.session_state.messages),
+                "embeddings_used": "OpenAI" if valid_openai else "Local (sentence-transformers)",
+                "model_provider": st.session_state.get('selected_provider', 'Unknown'),
+                "model": st.session_state.get('model_choice', 'Unknown')
+            }
+            
+            if format_type == "json":
+                # JSON format
+                export_data = {
+                    "metadata": metadata,
+                    "messages": []
+                }
+                
+                for i, message in enumerate(st.session_state.messages, 1):
+                    message_data = {
+                        "message_id": i,
+                        "role": message["role"],
+                        "content": message["content"],
+                        "timestamp": message.get("timestamp", "unknown")
+                    }
+                    
+                    if "sources" in message and message["sources"]:
+                        message_data["sources"] = message["sources"]
+                    
+                    export_data["messages"].append(message_data)
+                
+                return json.dumps(export_data, indent=2, ensure_ascii=False)
+            
+            elif format_type == "text":
+                # Plain text format
+                chat_text = "RAG Chatbot Conversation Export\n"
+                chat_text += "=" * 40 + "\n\n"
+                chat_text += f"Export Date: {metadata['export_date']}\n"
+                chat_text += f"Total Messages: {metadata['total_messages']}\n"
+                chat_text += f"Embeddings Used: {metadata['embeddings_used']}\n"
+                chat_text += f"Model Provider: {metadata['model_provider']}\n"
+                chat_text += f"Model: {metadata['model']}\n\n"
+                chat_text += "-" * 40 + "\n\n"
+                
+                for i, message in enumerate(st.session_state.messages, 1):
+                    role = "USER" if message["role"] == "user" else "ASSISTANT"
+                    chat_text += f"[{i}] {role}:\n"
+                    chat_text += f"{message['content']}\n\n"
+                    
+                    if "sources" in message and message["sources"]:
+                        chat_text += "SOURCES:\n"
+                        for j, source in enumerate(message["sources"], 1):
+                            chat_text += f"  {j}. (Score: {source['similarity_score']:.3f}) {source['content_preview']}\n"
                         chat_text += "\n"
+                    
+                    chat_text += "-" * 40 + "\n\n"
+                
+                return chat_text
             
-            st.download_button(
-                "📥 Download Chat History",
-                data=chat_text,
-                file_name="rag_chatbot_history.md",
-                mime="text/markdown"
-            )
-        
+            else:
+                # Markdown format (default)
+                chat_text = f"# RAG Chatbot Conversation Export\n\n"
+                chat_text += f"**Export Date:** {metadata['export_date']}\n"
+                chat_text += f"**Total Messages:** {metadata['total_messages']}\n"
+                chat_text += f"**Embeddings Used:** {metadata['embeddings_used']}\n"
+                chat_text += f"**Model Provider:** {metadata['model_provider']}\n"
+                chat_text += f"**Model:** {metadata['model']}\n\n"
+                chat_text += "---\n\n"
+                
+                for i, message in enumerate(st.session_state.messages, 1):
+                    if message["role"] == "user":
+                        chat_text += f"## Message {i} - User\n\n"
+                        chat_text += f"{message['content']}\n\n"
+                    else:
+                        chat_text += f"## Message {i} - Assistant\n\n"
+                        chat_text += f"{message['content']}\n\n"
+                        
+                        if "sources" in message and message["sources"]:
+                            chat_text += "### Sources Referenced:\n\n"
+                            for j, source in enumerate(message["sources"], 1):
+                                chat_text += f"**Source {j}** (Similarity: {source['similarity_score']:.3f}):\n"
+                                chat_text += f"```\n{source['content_preview']}\n```\n\n"
+                    
+                    chat_text += "---\n\n"
+                
+                return chat_text
+            
         except Exception as e:
-            st.error(f"Error exporting chat history: {str(e)}")
+            error_msg = f"Error generating chat export: {str(e)}"
+            if format_type == "json":
+                return json.dumps({"error": error_msg})
+            else:
+                return f"# Export Error\n\n{error_msg}"
     
     def run(self):
         """Run the main application."""
